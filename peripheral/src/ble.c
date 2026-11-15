@@ -1,10 +1,32 @@
+#include <stddef.h>
+
+#include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/cs.h>
+#include <zephyr/bluetooth/gatt.h>
 #include <zephyr/logging/log.h>
 
 #include "ble.h"
+#include "radar_svc.h"
 
 LOG_MODULE_REGISTER(ble, LOG_LEVEL_INF);
+
+static struct bt_conn *conn;
+
+K_SEM_DEFINE(sem_connected, 0, 1);
+
+static void iq_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	LOG_INF("IQ notifications %s", value == BT_GATT_CCC_NOTIFY ? "enabled" : "disabled");
+}
+
+BT_GATT_SERVICE_DEFINE(radar_svc,
+	BT_GATT_PRIMARY_SERVICE(RADAR_SVC_UUID),
+	BT_GATT_CHARACTERISTIC(RADAR_IQ_UUID, BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_NONE,
+			       NULL, NULL, NULL),
+	BT_GATT_CCC(iq_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
 
 static const struct bt_data ad[] =
 {
@@ -27,14 +49,88 @@ static int adv_start(void)
 	return 0;
 }
 
-static void connected(struct bt_conn *conn, uint8_t err)
+static struct radar_iq_report report;
+
+static bool cs_step_collect(struct bt_le_cs_subevent_step *step, void *user_data)
 {
-	LOG_INF("Connected (err %u)", err);
+	if (step->mode != BT_HCI_OP_LE_CS_MAIN_MODE_2 || report.count >= RADAR_MAX_CHANNELS)
+	{
+		return true;
+	}
+
+	const struct bt_hci_le_cs_step_data_mode_2 *data = (const void *)step->data;
+	struct bt_le_cs_iq_sample iq = bt_le_cs_parse_pct(data->tone_info[0].phase_correction_term);
+
+	report.iq[report.count].channel = step->channel;
+	report.iq[report.count].i = iq.i;
+	report.iq[report.count].q = iq.q;
+	report.iq[report.count].quality = data->tone_info[0].quality_indicator;
+	report.count++;
+
+	return true;
 }
 
-static void disconnected(struct bt_conn *conn, uint8_t reason)
+static void cs_report_send(struct bt_conn *c)
+{
+	if (!bt_gatt_is_subscribed(c, &radar_svc.attrs[1], BT_GATT_CCC_NOTIFY))
+	{
+		return;
+	}
+
+	uint16_t len = offsetof(struct radar_iq_report, iq) + report.count * sizeof(struct radar_iq);
+	int err = bt_gatt_notify(c, &radar_svc.attrs[1], &report, len);
+
+	if (err)
+	{
+		LOG_ERR("IQ notify failed (err %d)", err);
+		return;
+	}
+
+	LOG_INF("Procedure %u sent, %u channels", report.procedure_counter, report.count);
+}
+
+static void cs_subevent_result(struct bt_conn *c, struct bt_conn_le_cs_subevent_result *result)
+{
+	if (result->header.procedure_counter != report.procedure_counter)
+	{
+		report.procedure_counter = result->header.procedure_counter;
+		report.count = 0;
+	}
+
+	if (result->step_data_buf)
+	{
+		bt_le_cs_step_data_parse(result->step_data_buf, cs_step_collect, NULL);
+	}
+
+	if (result->header.procedure_done_status == BT_CONN_LE_CS_PROCEDURE_COMPLETE)
+	{
+		cs_report_send(c);
+		report.count = 0;
+	}
+	else if (result->header.procedure_done_status == BT_CONN_LE_CS_PROCEDURE_ABORTED)
+	{
+		report.count = 0;
+	}
+}
+
+static void connected(struct bt_conn *c, uint8_t err)
+{
+	LOG_INF("Connected (err %u)", err);
+
+	if (err)
+	{
+		return;
+	}
+
+	conn = bt_conn_ref(c);
+	k_sem_give(&sem_connected);
+}
+
+static void disconnected(struct bt_conn *c, uint8_t reason)
 {
 	LOG_INF("Disconnected (reason %u)", reason);
+	bt_conn_unref(conn);
+	conn = NULL;
 }
 
 static void recycled(void)
@@ -47,6 +143,7 @@ BT_CONN_CB_DEFINE(conn_callbacks) =
 	.connected = connected,
 	.disconnected = disconnected,
 	.recycled = recycled,
+	.le_cs_subevent_data_available = cs_subevent_result,
 };
 
 int ble_init(void)
@@ -60,4 +157,30 @@ int ble_init(void)
 	}
 
 	return adv_start();
+}
+
+void ble_reflector_run(void)
+{
+	const struct bt_le_cs_set_default_settings_param settings =
+	{
+		.enable_initiator_role = false,
+		.enable_reflector_role = true,
+		.cs_sync_antenna_selection = BT_LE_CS_ANTENNA_SELECTION_OPT_REPETITIVE,
+		.max_tx_power = BT_HCI_OP_LE_CS_MAX_MAX_TX_POWER,
+	};
+
+	while (true)
+	{
+		k_sem_take(&sem_connected, K_FOREVER);
+
+		int err = bt_le_cs_set_default_settings(conn, &settings);
+
+		if (err)
+		{
+			LOG_ERR("CS default settings failed (err %d)", err);
+			continue;
+		}
+
+		LOG_INF("CS reflector role enabled");
+	}
 }

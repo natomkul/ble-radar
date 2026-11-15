@@ -5,4 +5,4 @@ project(radar_central)
 
 file(GLOB app_sources CONFIGURE_DEPENDS src/*.c)
 target_sources(app PRIVATE ${app_sources})
-target_include_directories(app PRIVATE include)
+target_include_directories(app PRIVATE include ../common)

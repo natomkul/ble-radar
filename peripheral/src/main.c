@@ -9,5 +9,7 @@ int main(void)
 		return err;
 	}
 
+	ble_reflector_run();
+
 	return 0;
 }

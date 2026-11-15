@@ -9,5 +9,7 @@ int main(void)
 		return err;
 	}
 
+	ble_initiator_run();
+
 	return 0;
 }
