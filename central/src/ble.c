@@ -1,4 +1,3 @@
-#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -10,6 +9,8 @@
 #include <zephyr/logging/log.h>
 
 #include "ble.h"
+#include "cs_channels.h"
+#include "distance.h"
 #include "radar_svc.h"
 
 LOG_MODULE_REGISTER(ble, LOG_LEVEL_INF);
@@ -192,12 +193,7 @@ static void cs_subevent_result(struct bt_conn *c, struct bt_conn_le_cs_subevent_
 		bt_le_cs_step_data_parse(result->step_data_buf, cs_step_collect, NULL);
 	}
 
-	if (result->header.procedure_done_status == BT_CONN_LE_CS_PROCEDURE_COMPLETE)
-	{
-		LOG_INF("Procedure %u measured, %u channels", local_report.procedure_counter,
-			local_report.count);
-	}
-	else if (result->header.procedure_done_status == BT_CONN_LE_CS_PROCEDURE_ABORTED)
+	if (result->header.procedure_done_status == BT_CONN_LE_CS_PROCEDURE_ABORTED)
 	{
 		LOG_WRN("Procedure %u aborted", local_report.procedure_counter);
 		local_report.count = 0;
@@ -286,9 +282,9 @@ static int cs_setup(void)
 		.channel_selection_type = BT_CONN_LE_CS_CHSEL_TYPE_3B,
 	};
 
-	for (uint8_t ch = 2; ch <= 76; ch++)
+	for (uint8_t ch = CS_FIRST_CH; ch < CS_FIRST_CH + CS_N_CH; ch++)
 	{
-		if (ch >= 23 && ch <= 25)
+		if (ch >= CS_FORBIDDEN_FIRST_CH && ch <= CS_FORBIDDEN_LAST_CH)
 		{
 			continue;
 		}
@@ -414,43 +410,6 @@ static uint8_t iq_discovered(struct bt_conn *c, const struct bt_gatt_attr *attr,
 	return BT_GATT_ITER_STOP;
 }
 
-#define RAD_TO_DEG (180.0f / 3.14159265f)
-
-static const struct radar_iq *iq_find(const struct radar_iq_report *report, uint8_t channel)
-{
-	for (uint8_t n = 0; n < report->count; n++)
-	{
-		if (report->iq[n].channel == channel)
-		{
-			return &report->iq[n];
-		}
-	}
-
-	return NULL;
-}
-
-static void iq_log(const struct radar_iq_report *peer)
-{
-	for (uint8_t n = 0; n < local_report.count; n++)
-	{
-		const struct radar_iq *c = &local_report.iq[n];
-		const struct radar_iq *p = iq_find(peer, c->channel);
-
-		if (!p)
-		{
-			LOG_WRN("ch %u: no peer data", c->channel);
-			continue;
-		}
-
-		int32_t re = c->i * p->i - c->q * p->q;
-		int32_t im = c->i * p->q + c->q * p->i;
-		int phase = (int)(atan2f(im, re) * RAD_TO_DEG);
-
-		LOG_INF("ch %u: C I %d Q %d q %u | P I %d Q %d q %u | phase %d",
-			c->channel, c->i, c->q, c->quality, p->i, p->q, p->quality, phase);
-	}
-}
-
 static uint8_t iq_notified(struct bt_conn *c, struct bt_gatt_subscribe_params *params,
 			   const void *data, uint16_t length)
 {
@@ -480,7 +439,7 @@ static uint8_t iq_notified(struct bt_conn *c, struct bt_gatt_subscribe_params *p
 	LOG_INF("Procedure %u: local %u, peer %u channels", peer->procedure_counter,
 		local_report.count, peer->count);
 
-	iq_log(peer);
+	distance_process(&local_report, peer);
 	return BT_GATT_ITER_CONTINUE;
 }
 
