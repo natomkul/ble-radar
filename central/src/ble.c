@@ -109,6 +109,7 @@ static void connected(struct bt_conn *c, uint8_t err)
 
 	LOG_INF("Connected");
 	local_report.count = 0;
+	distance_reset();
 
 	int ret = bt_conn_set_security(c, BT_SECURITY_L2);
 
@@ -349,8 +350,8 @@ static int cs_setup(void)
 	{
 		.config_id = CS_CONFIG_ID,
 		.max_procedure_len = 1600,
-		.min_procedure_interval = 100,
-		.max_procedure_interval = 100,
+		.min_procedure_interval = 10,
+		.max_procedure_interval = 10,
 		.max_procedure_count = 0,
 		.min_subevent_len = 50000,
 		.max_subevent_len = 50000,
@@ -435,9 +436,6 @@ static uint8_t iq_notified(struct bt_conn *c, struct bt_gatt_subscribe_params *p
 			local_report.procedure_counter, peer->procedure_counter);
 		return BT_GATT_ITER_CONTINUE;
 	}
-
-	LOG_INF("Procedure %u: local %u, peer %u channels", peer->procedure_counter,
-		local_report.count, peer->count);
 
 	distance_process(&local_report, peer);
 	return BT_GATT_ITER_CONTINUE;
