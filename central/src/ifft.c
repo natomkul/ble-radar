@@ -9,6 +9,8 @@
 #define PI             3.14159265f
 #define NFFT           512
 #define THRESHOLD      0.4f
+#define MIN_DISTANCE   -2.0f
+#define MIN_BIN        ((int)(MIN_DISTANCE * 2.0f * NFFT * DF / SPEED_OF_LIGHT))
 
 static float cos_table[NFFT];
 static float sin_table[NFFT];
@@ -73,7 +75,7 @@ static int earliest_peak(void)
 		g -= NFFT;
 	}
 
-	for (int i = -NFFT / 2 + 1; i < g; i++)
+	for (int i = MIN_BIN; i < g; i++)
 	{
 		if (at(i) > at(i - 1) && at(i) > at(i + 1) && at(i) >= THRESHOLD * at(g))
 		{
