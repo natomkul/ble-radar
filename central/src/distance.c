@@ -1,7 +1,9 @@
 #include <math.h>
 
 #include <zephyr/bluetooth/hci_types.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 #include "cs_channels.h"
 #include "distance.h"
@@ -16,6 +18,19 @@ LOG_MODULE_REGISTER(distance, LOG_LEVEL_INF);
 
 #define MUSIC_BEFORE 4.0f
 #define MUSIC_AFTER  2.0f
+
+#define DISTANCE_STACK_SIZE 3072
+#define DISTANCE_PRIORITY   10
+
+struct reports
+{
+	struct radar_iq_report local;
+	struct radar_iq_report peer;
+};
+
+K_MSGQ_DEFINE(distance_msgq, sizeof(struct reports), 1, 1);
+
+static atomic_t reset_req;
 
 static float ps_hist[AVG_N];
 static float ifft_hist[AVG_N];
@@ -76,11 +91,11 @@ static const struct radar_iq *iq_find(const struct radar_iq_report *report, uint
 
 void distance_reset(void)
 {
-	avg_pos = 0;
-	avg_count = 0;
+	k_msgq_purge(&distance_msgq);
+	atomic_set(&reset_req, 1);
 }
 
-void distance_process(const struct radar_iq_report *local, const struct radar_iq_report *peer)
+static void process(const struct radar_iq_report *local, const struct radar_iq_report *peer)
 {
 	float re[CS_N_CH] = {0};
 	float im[CS_N_CH] = {0};
@@ -152,4 +167,36 @@ void distance_process(const struct radar_iq_report *local, const struct radar_iq
 		(int)(ps_mean * 100.0f), (int)(ps_std * 100.0f),
 		(int)(ifft_mean * 100.0f), (int)(ifft_std * 100.0f),
 		(int)(music_mean * 100.0f), (int)(music_std * 100.0f));
+}
+
+static void distance_thread(void *p1, void *p2, void *p3)
+{
+	static struct reports r;
+
+	while (true)
+	{
+		k_msgq_get(&distance_msgq, &r, K_FOREVER);
+
+		if (atomic_clear(&reset_req))
+		{
+			avg_pos = 0;
+			avg_count = 0;
+		}
+
+		process(&r.local, &r.peer);
+	}
+}
+
+K_THREAD_DEFINE(distance_tid, DISTANCE_STACK_SIZE, distance_thread, NULL, NULL, NULL,
+		DISTANCE_PRIORITY, 0, 0);
+
+void distance_process(const struct radar_iq_report *local, const struct radar_iq_report *peer)
+{
+	static struct reports r;
+
+	r.local = *local;
+	r.peer = *peer;
+
+	k_msgq_purge(&distance_msgq);
+	k_msgq_put(&distance_msgq, &r, K_NO_WAIT);
 }
