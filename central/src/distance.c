@@ -6,38 +6,59 @@
 #include "cs_channels.h"
 #include "distance.h"
 #include "ifft.h"
+#include "music.h"
 #include "phase_slope.h"
+#include "ui.h"
 
 LOG_MODULE_REGISTER(distance, LOG_LEVEL_INF);
 
 #define AVG_N 10
 
+#define MUSIC_BEFORE 4.0f
+#define MUSIC_AFTER  2.0f
+
 static float ps_hist[AVG_N];
 static float ifft_hist[AVG_N];
+static float music_hist[AVG_N];
 static uint8_t avg_pos;
 static uint8_t avg_count;
 
-static void mean_std(const float *v, float *mean, float *std)
+static int mean_std(const float *v, float *mean, float *std)
 {
 	float sum = 0.0f;
+	int count = 0;
 
 	for (int n = 0; n < AVG_N; n++)
 	{
-		sum += v[n];
+		if (!isnan(v[n]))
+		{
+			sum += v[n];
+			count++;
+		}
 	}
 
-	*mean = sum / AVG_N;
+	if (count == 0)
+	{
+		return 0;
+	}
+
+	*mean = sum / count;
 
 	float sq = 0.0f;
 
 	for (int n = 0; n < AVG_N; n++)
 	{
-		float dv = v[n] - *mean;
+		if (!isnan(v[n]))
+		{
+			float dv = v[n] - *mean;
 
-		sq += dv * dv;
+			sq += dv * dv;
+		}
 	}
 
-	*std = sqrtf(sq / AVG_N);
+	*std = sqrtf(sq / count);
+
+	return count;
 }
 
 static const struct radar_iq *iq_find(const struct radar_iq_report *report, uint8_t channel)
@@ -91,9 +112,11 @@ void distance_process(const struct radar_iq_report *local, const struct radar_iq
 	}
 	
 	float d_ifft = ifft_estimate(re, im);
+	float d_music = music_estimate(re, im, d_ifft - MUSIC_BEFORE, d_ifft + MUSIC_AFTER);
 
 	ps_hist[avg_pos] = d_ps;
 	ifft_hist[avg_pos] = d_ifft;
+	music_hist[avg_pos] = d_music;
 	avg_pos = (avg_pos + 1) % AVG_N;
 
 	if (avg_count < AVG_N)
@@ -106,12 +129,27 @@ void distance_process(const struct radar_iq_report *local, const struct radar_iq
 		return;
 	}
 
-	float ps_mean, ps_std, ifft_mean, ifft_std;
+	float ps_mean = 0.0f, ps_std = 0.0f;
+	float ifft_mean = 0.0f, ifft_std = 0.0f;
+	float music_mean = 0.0f, music_std = 0.0f;
 
 	mean_std(ps_hist, &ps_mean, &ps_std);
 	mean_std(ifft_hist, &ifft_mean, &ifft_std);
+	int music_n = mean_std(music_hist, &music_mean, &music_std);
 
-	LOG_INF("Avg PS %d cm (std %d cm), IFFT %d cm (std %d cm)",
+	ui_show((int)(ps_mean * 100.0f), (int)(ifft_mean * 100.0f), (int)(music_mean * 100.0f),
+		music_n > 0);
+
+	if (music_n == 0)
+	{
+		LOG_INF("Avg PS %d cm (std %d cm), IFFT %d cm (std %d cm), MUSIC n/a",
+			(int)(ps_mean * 100.0f), (int)(ps_std * 100.0f),
+			(int)(ifft_mean * 100.0f), (int)(ifft_std * 100.0f));
+		return;
+	}
+
+	LOG_INF("Avg PS %d cm (std %d cm), IFFT %d cm (std %d cm), MUSIC %d cm (std %d cm)",
 		(int)(ps_mean * 100.0f), (int)(ps_std * 100.0f),
-		(int)(ifft_mean * 100.0f), (int)(ifft_std * 100.0f));
+		(int)(ifft_mean * 100.0f), (int)(ifft_std * 100.0f),
+		(int)(music_mean * 100.0f), (int)(music_std * 100.0f));
 }
